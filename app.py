@@ -264,7 +264,8 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
 @app.route("/api/fixtures", methods=["GET"])
 def get_fixtures():
     try:
-        api_key = "7e1b47eae1c24708859d23d466b60a5c"
+        import os
+api_key = os.environ.get("FOOTBALL_API_TOKEN", "")
         headers = {"X-Auth-Token": api_key}
 
         res = requests.get(
