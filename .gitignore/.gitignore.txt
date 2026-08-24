@@ -1,0 +1,6 @@
+*.csv
+*.zip
+*.sqlite
+__pycache__/
+*.pyc
+.env
