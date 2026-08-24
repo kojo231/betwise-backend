@@ -1,3 +1,4 @@
+import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
@@ -17,34 +18,18 @@ TEAM_MAP = {
     "Wolverhampton Wanderers": "Wolves",
     "Manchester City": "Man City",
     "Manchester United": "Man United",
-    "Manchester Utd": "Man United",
     "Newcastle United": "Newcastle",
     "Tottenham Hotspur": "Tottenham",
     "West Ham United": "West Ham",
     "Nottingham Forest": "Nottm Forest",
     "Leicester City": "Leicester",
     "Sheffield United": "Sheffield Utd",
-    "Luton Town": "Luton",
     "Ipswich Town": "Ipswich",
-    "Norwich City": "Norwich",
-    "West Bromwich Albion": "West Brom",
-    "Queens Park Rangers": "QPR",
-    "Cardiff City": "Cardiff",
-    "Swansea City": "Swansea",
     "Atletico Madrid": "Atletico Madrid",
     "Athletic Club": "Ath Bilbao",
-    "Athletic Bilbao": "Ath Bilbao",
-    "Real Betis": "Betis",
-    "Real Sociedad": "Sociedad",
     "Borussia Dortmund": "Dortmund",
-    "RB Leipzig": "RB Leipzig",
     "Bayer Leverkusen": "Leverkusen",
     "Eintracht Frankfurt": "Ein Frankfurt",
-    "Borussia Monchengladbach": "M'gladbach",
-    "VfB Stuttgart": "Stuttgart",
-    "VfL Wolfsburg": "Wolfsburg",
-    "TSG Hoffenheim": "Hoffenheim",
-    "FC Schalke 04": "Schalke",
     "AC Milan": "AC Milan",
     "Inter Milan": "Inter",
     "Internazionale": "Inter",
@@ -52,18 +37,14 @@ TEAM_MAP = {
     "AS Roma": "Roma",
     "SS Lazio": "Lazio",
     "SSC Napoli": "Napoli",
-    "Atalanta BC": "Atalanta",
     "Paris Saint-Germain": "PSG",
-    "Paris SG": "PSG",
     "Olympique Marseille": "Marseille",
     "Olympique Lyonnais": "Lyon",
     "AS Monaco": "Monaco",
     "LOSC Lille": "Lille",
-    "Stade Rennais": "Rennes",
     "SL Benfica": "Benfica",
     "FC Porto": "Porto",
     "Sporting CP": "Sporting",
-    "SC Braga": "Braga",
 }
 
 def map_team(name):
@@ -89,7 +70,6 @@ def train_model():
     df["ProbH"] = 1 / df["B365H"]
     df["ProbD"] = 1 / df["B365D"]
     df["ProbA"] = 1 / df["B365A"]
-
     df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, format="mixed")
     df = df.sort_values("Date").reset_index(drop=True)
 
@@ -101,14 +81,12 @@ def train_model():
     away_gc = np.zeros(len(df))
     home_streak = np.zeros(len(df))
     away_streak = np.zeros(len(df))
-
     home_history = {}
     away_history = {}
     team_streak = {}
 
     for i, row in df.iterrows():
         ht, at = row["HomeTeam"], row["AwayTeam"]
-
         h_hist = home_history.get(ht, [])[-5:]
         a_hist = away_history.get(at, [])[-5:]
 
@@ -164,10 +142,8 @@ def train_model():
 
     X = df[features].fillna(0)
     y = df["FTR"]
-
     model = RandomForestClassifier(n_estimators=200, random_state=42, max_depth=10)
     model.fit(X, y)
-
     return model, home_history, away_history, team_streak
 
 
@@ -182,10 +158,7 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
         hist = history.get(team, [])[-5:]
         if not hist:
             return 7, 2.0, 1.5
-        pts = sum(x[0] for x in hist)
-        gs = sum(x[1] for x in hist)
-        gc = sum(x[2] for x in hist)
-        return pts, gs, gc
+        return sum(x[0] for x in hist), sum(x[1] for x in hist), sum(x[2] for x in hist)
 
     h_form, h_gs, h_gc = get_stats(home_team, home_history)
     a_form, a_gs, a_gc = get_stats(away_team, away_history)
@@ -193,18 +166,10 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
     a_streak = team_streak.get(away_team, 0)
 
     X = pd.DataFrame([{
-        "ProbH": 1 / h_odds,
-        "ProbD": 1 / d_odds,
-        "ProbA": 1 / a_odds,
-        "HomeForm": h_form,
-        "AwayForm": a_form,
-        "FormDiff": h_form - a_form,
-        "HomeGS": h_gs,
-        "AwayGS": a_gs,
-        "HomeGC": h_gc,
-        "AwayGC": a_gc,
-        "HomeStreak": h_streak,
-        "AwayStreak": a_streak,
+        "ProbH": 1 / h_odds, "ProbD": 1 / d_odds, "ProbA": 1 / a_odds,
+        "HomeForm": h_form, "AwayForm": a_form, "FormDiff": h_form - a_form,
+        "HomeGS": h_gs, "AwayGS": a_gs, "HomeGC": h_gc, "AwayGC": a_gc,
+        "HomeStreak": h_streak, "AwayStreak": a_streak,
         "MomentumDiff": h_streak - a_streak
     }])
 
@@ -215,7 +180,6 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
     home_pct = result.get("H", 33)
     draw_pct = result.get("D", 33)
     away_pct = result.get("A", 33)
-
     confidence = round(max(home_pct, draw_pct, away_pct), 1)
     conf_label = "High" if confidence >= 60 else "Medium" if confidence >= 50 else "Low"
     prediction = "H" if home_pct == max(home_pct, draw_pct, away_pct) else \
@@ -239,13 +203,9 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
         return "No clear streak"
 
     return {
-        "home_pct": home_pct,
-        "draw_pct": draw_pct,
-        "away_pct": away_pct,
-        "prediction": prediction,
-        "confidence": confidence,
-        "confidence_label": conf_label,
-        "over_under": over_under,
+        "home_pct": home_pct, "draw_pct": draw_pct, "away_pct": away_pct,
+        "prediction": prediction, "confidence": confidence,
+        "confidence_label": conf_label, "over_under": over_under,
         "double_chance": {
             "home_or_draw": round(home_pct + draw_pct, 1),
             "away_or_draw": round(away_pct + draw_pct, 1),
@@ -264,8 +224,7 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
 @app.route("/api/fixtures", methods=["GET"])
 def get_fixtures():
     try:
-        import os
-api_key = os.environ.get("FOOTBALL_API_TOKEN", "")
+        api_key = os.environ.get("FOOTBALL_API_TOKEN", "")
         headers = {"X-Auth-Token": api_key}
 
         res = requests.get(
