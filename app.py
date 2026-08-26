@@ -320,11 +320,7 @@ def get_fixtures():
             h_odds = 2.0
             d_odds = 3.4
             a_odds = 4.0
-            if m.get("odds"):
-                h_odds = m["odds"].get("homeWin", 2.0) or 2.0
-                d_odds = m["odds"].get("draw", 3.4) or 3.4
-                a_odds = m["odds"].get("awayWin", 4.0) or 4.0
-
+            
             home = map_team(raw_home)
             away = map_team(raw_away)
 
