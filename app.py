@@ -1,4 +1,6 @@
 import os
+import json
+from datetime import date, datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 import requests
@@ -6,7 +8,6 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import math
-from datetime import date
 
 app = Flask(__name__)
 CORS(app)
@@ -142,7 +143,14 @@ def train_model():
 
     X = df[features].fillna(0)
     y = df["FTR"]
-    model = RandomForestClassifier(n_estimators=200, random_state=42, max_depth=10)
+
+    # Use class_weight balanced to reduce home bias
+    model = RandomForestClassifier(
+        n_estimators=300,
+        random_state=42,
+        max_depth=10,
+        class_weight="balanced"
+    )
     model.fit(X, y)
     return model, home_history, away_history, team_streak
 
@@ -153,108 +161,54 @@ print("Model ready!")
 
 
 # --- PREDICTION ---
-def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
-    """
-    Predict match outcome.
-    
-    Key improvement: When a team has little or no current season data,
-    we rely more heavily on bookmaker odds rather than defaulting
-    to home bias. Bookmakers already have current information built
-    into their odds.
-    """
+def predict_match(home_team, away_team, h_odds=None, d_odds=None, a_odds=None):
     def get_stats(team, history):
         hist = history.get(team, [])[-5:]
-        return hist, len(hist)
+        if not hist:
+            return 0, 0, 0
+        return sum(x[0] for x in hist), sum(x[1] for x in hist), sum(x[2] for x in hist)
 
-    h_hist, h_data_count = get_stats(home_team, home_history)
-    a_hist, a_data_count = get_stats(away_team, away_history)
-
-    # How much data do we actually have?
-    # 0 games = no data, 5 games = full confidence
-    h_confidence = h_data_count / 5.0
-    a_confidence = a_data_count / 5.0
-    data_confidence = (h_confidence + a_confidence) / 2.0
-
-    # Calculate stats from available history
-    if h_hist:
-        h_form = sum(x[0] for x in h_hist)
-        h_gs = sum(x[1] for x in h_hist)
-        h_gc = sum(x[2] for x in h_hist)
-    else:
-        # No data — use neutral values, not home-biased defaults
-        h_form = 5.0  # neutral form
-        h_gs = 1.3 * len(h_hist) if h_hist else 6.5
-        h_gc = 1.3 * len(h_hist) if h_hist else 6.5
-
-    if a_hist:
-        a_form = sum(x[0] for x in a_hist)
-        a_gs = sum(x[1] for x in a_hist)
-        a_gc = sum(x[2] for x in a_hist)
-    else:
-        a_form = 5.0  # neutral form
-        a_gs = 1.3 * len(a_hist) if a_hist else 6.5
-        a_gc = 1.3 * len(a_hist) if a_hist else 6.5
-
+    h_form, h_gs, h_gc = get_stats(home_team, home_history)
+    a_form, a_gs, a_gc = get_stats(away_team, away_history)
     h_streak = team_streak.get(home_team, 0)
     a_streak = team_streak.get(away_team, 0)
 
-    # Model prediction
+    # Use odds if provided otherwise use neutral odds
+    # Neutral odds = equal probability for all outcomes
+    h_odds = h_odds or 3.0
+    d_odds = d_odds or 3.0
+    a_odds = a_odds or 3.0
+
     X = pd.DataFrame([{
-        "ProbH": 1 / h_odds, "ProbD": 1 / d_odds, "ProbA": 1 / a_odds,
-        "HomeForm": h_form, "AwayForm": a_form, "FormDiff": h_form - a_form,
-        "HomeGS": h_gs, "AwayGS": a_gs, "HomeGC": h_gc, "AwayGC": a_gc,
-        "HomeStreak": h_streak, "AwayStreak": a_streak,
+        "ProbH": 1 / h_odds,
+        "ProbD": 1 / d_odds,
+        "ProbA": 1 / a_odds,
+        "HomeForm": h_form,
+        "AwayForm": a_form,
+        "FormDiff": h_form - a_form,
+        "HomeGS": h_gs,
+        "AwayGS": a_gs,
+        "HomeGC": h_gc,
+        "AwayGC": a_gc,
+        "HomeStreak": h_streak,
+        "AwayStreak": a_streak,
         "MomentumDiff": h_streak - a_streak
     }])
 
     proba = model.predict_proba(X)[0]
     classes = model.classes_
-    model_result = {c: float(p) for c, p in zip(classes, proba)}
+    result = {c: round(float(p) * 100, 1) for c, p in zip(classes, proba)}
 
-    model_h = model_result.get("H", 0.33)
-    model_d = model_result.get("D", 0.33)
-    model_a = model_result.get("A", 0.33)
+    home_pct = result.get("H", 33.3)
+    draw_pct = result.get("D", 33.3)
+    away_pct = result.get("A", 33.3)
 
-    # Bookmaker implied probabilities (normalize to sum to 1)
-    raw_h = 1 / h_odds
-    raw_d = 1 / d_odds
-    raw_a = 1 / a_odds
-    total = raw_h + raw_d + raw_a
-    bookie_h = raw_h / total
-    bookie_d = raw_d / total
-    bookie_a = raw_a / total
+    max_pct = max(home_pct, draw_pct, away_pct)
+    prediction = "H" if home_pct == max_pct else "A" if away_pct == max_pct else "D"
 
-    # BLEND: When data is scarce, trust bookmakers more
-    # data_confidence = 0 means no data → use bookmakers 100%
-    # data_confidence = 1 means full data → use model 70%, bookmakers 30%
-    max_model_weight = 0.65
-    model_weight = data_confidence * max_model_weight
-    bookie_weight = 1.0 - model_weight
+    conf_label = "High" if max_pct >= 60 else "Medium" if max_pct >= 50 else "Low"
 
-    final_h = round((model_h * model_weight + bookie_h * bookie_weight) * 100, 1)
-    final_d = round((model_d * model_weight + bookie_d * bookie_weight) * 100, 1)
-    final_a = round((model_a * model_weight + bookie_a * bookie_weight) * 100, 1)
-
-    # Normalize to 100%
-    total_pct = final_h + final_d + final_a
-    final_h = round(final_h / total_pct * 100, 1)
-    final_d = round(final_d / total_pct * 100, 1)
-    final_a = round(100 - final_h - final_d, 1)
-
-    # Confidence level — honest about data limitations
-    max_pct = max(final_h, final_d, final_a)
-    if data_confidence < 0.3:
-        conf_label = "Low"  # Honest: very little current data
-    elif data_confidence < 0.7:
-        conf_label = "Low" if max_pct < 50 else "Medium"
-    else:
-        conf_label = "High" if max_pct >= 60 else "Medium" if max_pct >= 50 else "Low"
-
-    prediction = "H" if final_h == max(final_h, final_d, final_a) else \
-                 "A" if final_a == max(final_h, final_d, final_a) else "D"
-
-    # Goals prediction
-    avg_goals = ((h_gs + a_gs) / max(len(h_hist) + len(a_hist), 1)) if (h_hist or a_hist) else 2.6
+    avg_goals = (h_gs + a_gs) / 10 if (h_gs + a_gs) > 0 else 2.6
 
     def poisson_over(lam, threshold):
         prob_under = sum([(lam**k * math.exp(-lam)) / math.factorial(k)
@@ -272,26 +226,58 @@ def predict_match(home_team, away_team, h_odds=2.0, d_odds=3.4, a_odds=4.0):
         return "No clear streak"
 
     return {
-        "home_pct": final_h,
-        "draw_pct": final_d,
-        "away_pct": final_a,
+        "home_pct": home_pct,
+        "draw_pct": draw_pct,
+        "away_pct": away_pct,
         "prediction": prediction,
         "confidence": round(max_pct, 1),
         "confidence_label": conf_label,
-        "data_confidence": round(data_confidence * 100),
         "over_under": over_under,
         "double_chance": {
-            "home_or_draw": round(final_h + final_d, 1),
-            "away_or_draw": round(final_a + final_d, 1),
-            "home_or_away": round(final_h + final_a, 1)
+            "home_or_draw": round(home_pct + draw_pct, 1),
+            "away_or_draw": round(away_pct + draw_pct, 1),
+            "home_or_away": round(home_pct + away_pct, 1)
         },
-        "home_to_score": round(min(90, max(35, (h_gs / max(len(h_hist), 1)) * 65)), 1),
-        "away_to_score": round(min(85, max(30, (a_gs / max(len(a_hist), 1)) * 60)), 1),
+        "home_to_score": round(min(90, max(30, (h_gs / 5) * 60)), 1),
+        "away_to_score": round(min(85, max(25, (a_gs / 5) * 55)), 1),
         "home_streak": streak_label(h_streak),
         "away_streak": streak_label(a_streak),
-        "home_avg_goals": round(h_gs / max(len(h_hist), 1), 1) if h_hist else 1.4,
-        "away_avg_goals": round(a_gs / max(len(a_hist), 1), 1) if a_hist else 1.2,
+        "home_avg_goals": round(h_gs / 5, 1) if h_gs > 0 else 1.3,
+        "away_avg_goals": round(a_gs / 5, 1) if a_gs > 0 else 1.1,
     }
+
+
+# --- PREDICTION HISTORY ---
+HISTORY_FILE = "prediction_history.json"
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_to_history(fixture):
+    history = load_history()
+    key = f"{fixture['date']}_{fixture['home_team']}_{fixture['away_team']}"
+    existing_keys = [f"{h['date']}_{h['home_team']}_{h['away_team']}" for h in history]
+    if key not in existing_keys:
+        history.append({
+            "date": fixture["date"],
+            "home_team": fixture["home_team"],
+            "away_team": fixture["away_team"],
+            "competition": fixture["competition"],
+            "prediction": fixture["prediction"],
+            "home_pct": fixture["home_pct"],
+            "draw_pct": fixture["draw_pct"],
+            "away_pct": fixture["away_pct"],
+            "confidence_label": fixture["confidence_label"],
+            "actual_result": None,
+            "correct": None,
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        history = history[-200:]
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(history, f)
 
 
 # --- ROUTES ---
@@ -316,20 +302,17 @@ def get_fixtures():
             time_str = m["utcDate"][11:16]
             league_name = m["competition"]["name"]
 
-            # Get odds if available
-            h_odds = 2.0
-            d_odds = 3.4
-            a_odds = 4.0
-            
             home = map_team(raw_home)
             away = map_team(raw_away)
 
-            pred = predict_match(home, away, h_odds, d_odds, a_odds)
+            pred = predict_match(home, away)
             pred["home_team"] = raw_home
             pred["away_team"] = raw_away
             pred["date"] = date_str
             pred["time"] = time_str
             pred["competition"] = league_name
+
+            save_to_history(pred)
             fixtures.append(pred)
 
         print(f"Returning {len(fixtures)} fixtures")
@@ -338,6 +321,12 @@ def get_fixtures():
     except Exception as e:
         print(f"API error: {e}")
         return jsonify({"fixtures": [], "source": "error", "error": str(e)})
+
+
+@app.route("/api/history", methods=["GET"])
+def get_history():
+    history = load_history()
+    return jsonify({"history": list(reversed(history))})
 
 
 @app.route("/api/health", methods=["GET"])
