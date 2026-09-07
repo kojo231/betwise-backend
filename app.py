@@ -187,7 +187,7 @@ def train_model():
         n_estimators=300,
         random_state=42,
         max_depth=10,
-        class_weight="balanced"
+        class_weight={"H": 1.0, "D": 1.4, "A": 1.2}
     )
     model.fit(X, y)
     return model, home_history, away_history, team_streak
