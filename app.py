@@ -12,6 +12,33 @@ import math
 app = Flask(__name__)
 CORS(app)
 
+# --- LEAGUE TIERS ---
+LEAGUE_TIERS = {
+    "England Premier League": 1,
+    "Spain La Liga": 1,
+    "Germany Bundesliga": 1,
+    "Italy Serie A": 1,
+    "France Ligue 1": 1,
+    "Portugal Primeira Liga": 2,
+    "Netherlands Eredivisie": 2,
+    "Belgium Jupiler League": 2,
+    "Scotland Premiership": 2,
+    "Turkey Ligi 1": 2,
+    "Greece Ethniki": 2,
+}
+
+# Competition name mapping from API to our dataset league names
+COMPETITION_MAP = {
+    "Premier League": "England Premier League",
+    "Primera Division": "Spain La Liga",
+    "Bundesliga": "Germany Bundesliga",
+    "Serie A": "Italy Serie A",
+    "Ligue 1": "France Ligue 1",
+    "Primeira Liga": "Portugal Primeira Liga",
+    "Eredivisie": "Netherlands Eredivisie",
+    "Championship": "England Championship",
+}
+
 # --- TEAM NAME MAPPING ---
 TEAM_MAP = {
     "Brighton and Hove Albion": "Brighton",
@@ -74,6 +101,9 @@ def train_model():
     df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, format="mixed")
     df = df.sort_values("Date").reset_index(drop=True)
 
+    # Add league tier
+    df["Tier"] = df["League"].map(LEAGUE_TIERS).fillna(3)
+
     home_form = np.zeros(len(df))
     away_form = np.zeros(len(df))
     home_gs = np.zeros(len(df))
@@ -82,14 +112,23 @@ def train_model():
     away_gc = np.zeros(len(df))
     home_streak = np.zeros(len(df))
     away_streak = np.zeros(len(df))
+
+    # Separate history by league tier
+    # Key: (team, tier) -> list of (pts, gs, gc)
     home_history = {}
     away_history = {}
     team_streak = {}
 
     for i, row in df.iterrows():
         ht, at = row["HomeTeam"], row["AwayTeam"]
-        h_hist = home_history.get(ht, [])[-5:]
-        a_hist = away_history.get(at, [])[-5:]
+        tier = int(row["Tier"])
+
+        # Use tier-specific history
+        h_key = (ht, tier)
+        a_key = (at, tier)
+
+        h_hist = home_history.get(h_key, [])[-5:]
+        a_hist = away_history.get(a_key, [])[-5:]
 
         if h_hist:
             home_form[i] = sum(x[0] for x in h_hist)
@@ -108,10 +147,10 @@ def train_model():
         elif row["FTR"] == "D": h_pts, a_pts = 1, 1
         else: h_pts, a_pts = 0, 3
 
-        if ht not in home_history: home_history[ht] = []
-        if at not in away_history: away_history[at] = []
-        home_history[ht].append((h_pts, row["FTHG"], row["FTAG"]))
-        away_history[at].append((a_pts, row["FTAG"], row["FTHG"]))
+        if h_key not in home_history: home_history[h_key] = []
+        if a_key not in away_history: away_history[a_key] = []
+        home_history[h_key].append((h_pts, row["FTHG"], row["FTAG"]))
+        away_history[a_key].append((a_pts, row["FTAG"], row["FTHG"]))
 
         if row["FTR"] == "H":
             team_streak[ht] = max(0, team_streak.get(ht, 0)) + 1
@@ -144,7 +183,6 @@ def train_model():
     X = df[features].fillna(0)
     y = df["FTR"]
 
-    # Use class_weight balanced to reduce home bias
     model = RandomForestClassifier(
         n_estimators=300,
         random_state=42,
@@ -161,20 +199,26 @@ print("Model ready!")
 
 
 # --- PREDICTION ---
-def predict_match(home_team, away_team, h_odds=None, d_odds=None, a_odds=None):
-    def get_stats(team, history):
-        hist = history.get(team, [])[-5:]
+def predict_match(home_team, away_team, competition="England Premier League",
+                  h_odds=None, d_odds=None, a_odds=None):
+
+    # Get tier for this competition
+    league_name = COMPETITION_MAP.get(competition, competition)
+    tier = LEAGUE_TIERS.get(league_name, 1)
+
+    def get_stats(team, is_home, tier):
+        key = (team, tier)
+        hist = home_history.get(key, [])[-5:] if is_home else away_history.get(key, [])[-5:]
         if not hist:
             return 0, 0, 0
         return sum(x[0] for x in hist), sum(x[1] for x in hist), sum(x[2] for x in hist)
 
-    h_form, h_gs, h_gc = get_stats(home_team, home_history)
-    a_form, a_gs, a_gc = get_stats(away_team, away_history)
+    h_form, h_gs, h_gc = get_stats(home_team, True, tier)
+    a_form, a_gs, a_gc = get_stats(away_team, False, tier)
     h_streak = team_streak.get(home_team, 0)
     a_streak = team_streak.get(away_team, 0)
 
-    # Use odds if provided otherwise use neutral odds
-    # Neutral odds = equal probability for all outcomes
+    # Use neutral odds if none provided
     h_odds = h_odds or 3.0
     d_odds = d_odds or 3.0
     a_odds = a_odds or 3.0
@@ -205,7 +249,6 @@ def predict_match(home_team, away_team, h_odds=None, d_odds=None, a_odds=None):
 
     max_pct = max(home_pct, draw_pct, away_pct)
     prediction = "H" if home_pct == max_pct else "A" if away_pct == max_pct else "D"
-
     conf_label = "High" if max_pct >= 60 else "Medium" if max_pct >= 50 else "Low"
 
     avg_goals = (h_gs + a_gs) / 10 if (h_gs + a_gs) > 0 else 2.6
@@ -300,17 +343,17 @@ def get_fixtures():
             raw_away = m["awayTeam"]["shortName"]
             date_str = m["utcDate"][:10]
             time_str = m["utcDate"][11:16]
-            league_name = m["competition"]["name"]
+            competition = m["competition"]["name"]
 
             home = map_team(raw_home)
             away = map_team(raw_away)
 
-            pred = predict_match(home, away)
+            pred = predict_match(home, away, competition)
             pred["home_team"] = raw_home
             pred["away_team"] = raw_away
             pred["date"] = date_str
             pred["time"] = time_str
-            pred["competition"] = league_name
+            pred["competition"] = competition
 
             save_to_history(pred)
             fixtures.append(pred)
